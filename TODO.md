@@ -119,3 +119,31 @@ New items, roughly in priority order:
   dialogs). A stand-in hosted like the event handler would likely unblock them,
   but it has to answer the backend's prompts on the user's behalf, so decide
   on a policy first (e.g. default answer + log every prompt).
+
+22. [x] C-RUN runtime-checking rules: list/add/edit/delete
+- `crun_get_default_action`/`crun_set_default_action`/`crun_list_rules`/
+  `crun_add_rule`/`crun_update_rule`/`crun_delete_rule`/`crun_load_filters`/
+  `crun_save_filters`, over the new `client.crun` API in iar-cspy.
+- `CRunBackend` (crun.thrift) only has add-rule (always `Log` action),
+  load/saveFilters (bulk file replace/dump) and get/setDefaultAction - no
+  list/update/delete RPC. `iar_cspy.crun` reconstructs those on a
+  save->parse->mutate->write->load round trip against the on-disk filter XML
+  format (reverse-engineered from `CrMessageFilter::Save`/`Load`, not
+  guessed). This assumes the MCP server and the debug backend share a
+  filesystem - true for the managed/local setup, not for a remote backend.
+- Open: `CRunDisplay` (the push-only service presenting live runtime-check
+  messages) is not built yet - it needs a hosted callback server like
+  `debugger.eventhandler`, plus a local cache/`crun_get_messages`-style tool.
+  Separate, larger piece of work.
+- For now: against an IDE-hosted session, both the messages and the rules
+  are already readable with the *existing* `listwindow_*` tools, no new code
+  - confirmed live (2026-11-18) against a running iaride: `listwindow_get_rows`
+  on window id `WIN_C_RUN_MESSAGES` ("C-RUN Messages") returns the live
+  runtime-check hits (message, source file, PC, core, nested call-stack
+  rows); `WIN_C_RUN_MESSAGE_RULES` ("C-RUN Message Rules") returns the rules
+  read-only (Check/Source File/Action columns), a second way to list them
+  alongside `crun_list_rules`. See `docs/crun.md`. This needs cspy-py's
+  `feat/listwindow-snapshot` fix first (tracked in cspy-py's TODO.md) - until
+  it lands, `listwindow_list_services`/`listwindow_get_rows` do not reach
+  these ids against an iaride host (only against CSpyServer2, which registers
+  one `ListWindowBackend` per window the old way).
