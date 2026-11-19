@@ -123,20 +123,21 @@ New items, roughly in priority order:
 22. [x] C-RUN runtime-checking rules: list/add/edit/delete
 - `crun_get_default_action`/`crun_set_default_action`/`crun_list_rules`/
   `crun_add_rule`/`crun_update_rule`/`crun_delete_rule`/`crun_load_filters`/
-  `crun_save_filters`, over the new `client.crun` API in iar-cspy.
+  `crun_save_filters`, over iar-cspy's `client.crun_rules` API.
 - `CRunBackend` (crun.thrift) only has add-rule (always `Log` action),
   load/saveFilters (bulk file replace/dump) and get/setDefaultAction - no
-  list/update/delete RPC. `iar_cspy.crun` reconstructs those on a
+  list/update/delete RPC. `client.crun_rules` reconstructs those on a
   save->parse->mutate->write->load round trip against the on-disk filter XML
   format (reverse-engineered from `CrMessageFilter::Save`/`Load`, not
   guessed). This assumes the MCP server and the debug backend share a
   filesystem - true for the managed/local setup, not for a remote backend.
-- Open: `CRunDisplay` (the push-only service presenting live runtime-check
-  messages) is not built yet - it needs a hosted callback server like
-  `debugger.eventhandler`, plus a local cache/`crun_get_messages`-style tool.
-  Separate, larger piece of work.
-- For now: against an IDE-hosted session, both the messages and the rules
-  are already readable with the *existing* `listwindow_*` tools, no new code
+- `crun_get_messages`/`crun_clear_messages` read the live messages through
+  iar-cspy's `client.crun_messages`, which hosts `CRunDisplay` (push-only).
+  Stopgap: `updateAll` carries no data and there is no call to read the list
+  back, so a namespace can be briefly emptier than the backend's list. Open:
+  switch to the interface's "get all messages" call once it exists.
+- Also: against an IDE-hosted session, both the messages and the rules
+  are readable with the *existing* `listwindow_*` tools, no new code
   - confirmed live (2026-11-18) against a running iaride: `listwindow_get_rows`
   on window id `WIN_C_RUN_MESSAGES` ("C-RUN Messages") returns the live
   runtime-check hits (message, source file, PC, core, nested call-stack
@@ -147,3 +148,12 @@ New items, roughly in priority order:
   it lands, `listwindow_list_services`/`listwindow_get_rows` do not reach
   these ids against an iaride host (only against CSpyServer2, which registers
   one `ListWindowBackend` per window the old way).
+
+23. [ ] Fix register reads (`client.debugger.registers()` / `debugger_register_snapshot`)
+- The CSPyMemory interface has historically been very picky about reading SFR and other non-regular memory spaces. This has struck e.g. reading multiple registers.  After the fixes in version 1.1 of the interface (MR !2411, IDE-8591-BB-remote-read-sfr-units) this has been fixed. One can now read a whole block of registers in one call.
+- Backwards compatibility: this is a silent improvement in the backend's Thrift
+  implementation (nothing in the IDL changed), so older backends may still
+  expect, or only work with, the byte-unit read. Select the read style by the
+  backend's API version rather than guessing from errors. `CSpyMemory` has
+  `GetServiceVersion()` (memory.thrift). Keep the old
+  byte-unit path for older versions.

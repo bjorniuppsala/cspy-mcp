@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from iar_cspy.crun import _RawEntry, _parse_filter_xml, _render_filter_xml
+from iar_cspy.testing import crun_message
 from iar_cspy.types import CRunBreakAction
 
 
@@ -152,3 +153,47 @@ def test_crun_load_and_save_filters_pass_the_filename_through(server, fake, tmp_
     out = server.crun_load_filters(out_path)
     assert out["ok"] is True
     assert rpc.args("crun", "loadFilters") == [(out_path,)]
+
+
+def _display(client):
+    """Push as the backend would: through the CRunDisplay handler iar_cspy hosts."""
+    return client.crun_messages.server.handler
+
+
+def test_crun_get_messages_reports_what_the_backend_pushed(server, fake):
+    client, _ = fake
+    handler = _display(client)
+    handler.itemAdded(crun_message(index=0, name="Division by zero", text="x / 0"), "core0")
+    handler.itemAdded(crun_message(index=1, name="Access out of bounds"), "core0")
+    handler.itemAdded(crun_message(index=0, name="Other"), "core1")
+
+    out = server.crun_get_messages()
+    assert out["ok"] is True
+    assert out["data"]["namespaces"] == ["core0", "core1"]
+    assert out["data"]["count"] == 3
+    assert [m["name"] for m in out["data"]["messages"]] == ["Division by zero", "Access out of bounds", "Other"]
+    assert out["data"]["messages"][0]["namespace"] == "core0"
+    assert out["data"]["messages"][0]["break_action"] == "LOG"
+
+    only = server.crun_get_messages(namespace="core1")
+    assert [m["name"] for m in only["data"]["messages"]] == ["Other"]
+
+
+def test_crun_get_messages_truncates(server, fake):
+    client, _ = fake
+    for i in range(5):
+        _display(client).itemAdded(crun_message(index=i), "")
+
+    out = server.crun_get_messages(max_messages=2)
+    assert (out["data"]["count"], out["data"]["truncated"], len(out["data"]["messages"])) == (5, True, 2)
+
+
+def test_crun_clear_messages(server, fake):
+    client, _ = fake
+    _display(client).itemAdded(crun_message(index=0), "core0")
+    _display(client).itemAdded(crun_message(index=0), "core1")
+
+    assert server.crun_clear_messages("core0")["ok"] is True
+    assert server.crun_get_messages()["data"]["namespaces"] == ["core1"]
+    server.crun_clear_messages()
+    assert server.crun_get_messages()["data"]["count"] == 0

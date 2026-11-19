@@ -15,9 +15,10 @@ index, can't rescope/delete the default rule - see CRUN_* in
 ``iar_cspy.errors.ERROR_CODES``), not the bare-``Any`` style breakpoints.py
 uses for pure passthroughs.
 
-Nothing here reads the live runtime-check messages (``CRunDisplay`` is not
-wired up yet) - until it is, ``listwindow_get_rows("WIN_C_RUN_MESSAGES")``
-already does, against an IDE-hosted session; see docs/crun.md.
+Live runtime-check messages come from ``crun_get_messages`` (iar-cspy's
+``client.crun_messages``, which hosts ``CRunDisplay``); against an IDE that
+already hosts that service, ``listwindow_get_rows("WIN_C_RUN_MESSAGES")`` reads
+them instead. See docs/crun.md.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ def crun_get_default_action() -> dict[str, Any]:
     """
     require_session("crun_get_default_action")
     try:
-        action = get_client().crun.default_action()
+        action = get_client().crun_rules.default_action()
     except CSpyError as exc:
         return _crun_error("crun_get_default_action", {}, exc)
     return envelope(ok=True, tool="crun_get_default_action", data={"action": action.name})
@@ -61,7 +62,7 @@ def crun_set_default_action(action: str) -> dict[str, Any]:
     require_session("crun_set_default_action")
     data = {"action": action}
     try:
-        get_client().crun.set_default_action(action)
+        get_client().crun_rules.set_default_action(action)
     except CSpyError as exc:
         return _crun_error("crun_set_default_action", data, exc)
     return envelope(ok=True, tool="crun_set_default_action", data=data)
@@ -77,7 +78,7 @@ def crun_list_rules() -> dict[str, Any]:
     """
     require_session("crun_list_rules")
     try:
-        rules = get_client().crun.rules()
+        rules = get_client().crun_rules.rules()
     except CSpyError as exc:
         return _crun_error("crun_list_rules", {}, exc)
     data = {"rules": [_rule_data(r) for r in rules], "count": len(rules)}
@@ -114,7 +115,7 @@ def crun_add_rule(
         "action": action,
     }
     try:
-        rule = get_client().crun.add_rule(
+        rule = get_client().crun_rules.add_rule(
             message_pattern,
             file=file,
             start_line=start_line,
@@ -159,7 +160,7 @@ def crun_update_rule(
         "action": action,
     }
     try:
-        rule = get_client().crun.update_rule(
+        rule = get_client().crun_rules.update_rule(
             int(index),
             message_pattern=message_pattern,
             file=file,
@@ -185,7 +186,7 @@ def crun_delete_rule(index: int) -> dict[str, Any]:
     require_session("crun_delete_rule")
     data = {"index": index}
     try:
-        get_client().crun.delete_rule(int(index))
+        get_client().crun_rules.delete_rule(int(index))
     except CSpyError as exc:
         return _crun_error("crun_delete_rule", data, exc)
     return envelope(ok=True, tool="crun_delete_rule", data=data)
@@ -201,7 +202,7 @@ def crun_load_filters(filename: str) -> dict[str, Any]:
     require_session("crun_load_filters")
     data = {"filename": filename}
     try:
-        get_client().crun.load_filters(filename)
+        get_client().crun_rules.load_filters(filename)
     except CSpyError as exc:
         return _crun_error("crun_load_filters", data, exc)
     return envelope(ok=True, tool="crun_load_filters", data=data)
@@ -217,7 +218,52 @@ def crun_save_filters(filename: str) -> dict[str, Any]:
     require_session("crun_save_filters")
     data = {"filename": filename}
     try:
-        get_client().crun.save_filters(filename)
+        get_client().crun_rules.save_filters(filename)
     except CSpyError as exc:
         return _crun_error("crun_save_filters", data, exc)
     return envelope(ok=True, tool="crun_save_filters", data=data)
+
+
+@mcp.tool()
+def crun_get_messages(namespace: str | None = None, max_messages: int = 200) -> dict[str, Any]:
+    """Read the live C-RUN runtime-check messages the backend has pushed (CRunDisplay).
+
+    Registers this server as the backend's `crun.display` on first use. Only
+    messages pushed after that are seen: call it before running the target. If
+    something else already registered `crun.display` (an IDE's own C-RUN
+    Messages window), nothing reaches this server and `data.receiving` is false;
+    read that window with listwindow_get_rows("WIN_C_RUN_MESSAGES") instead.
+
+    Messages are kept per `namespace` (the backend partner that sent them; ""
+    for an IDE, which hosts every core itself). Pass one to see only its
+    messages. Each message has `name`, `text`, `core`, `cycle`, `repeat_count`,
+    `call_stack`, `break_action` and nested `sub_messages`. `data.truncated` is
+    true when more than `max_messages` matched.
+
+    A backend's `updateAll` push empties a namespace until the following pushes
+    refill it, so the list can briefly be shorter than the backend's.
+    """
+    messages = get_client().crun_messages
+    try:
+        registration = messages.ensure_registered()
+    except CSpyError as exc:
+        return _crun_error("crun_get_messages", {}, exc)
+    stored = messages.all_messages() if namespace is None else {namespace: messages.messages(namespace)}
+    limit = max(1, int(max_messages))
+    flat = [(ns, m) for ns, items in sorted(stored.items()) for m in items]
+    data = {
+        "receiving": messages.receiving,
+        "registration": registration,
+        "namespaces": messages.namespaces(),
+        "count": len(flat),
+        "truncated": len(flat) > limit,
+        "messages": [{"namespace": ns, **m.to_dict()} for ns, m in flat[:limit]],
+    }
+    return envelope(ok=True, tool="crun_get_messages", data=data)
+
+
+@mcp.tool()
+def crun_clear_messages(namespace: str | None = None) -> dict[str, Any]:
+    """Forget the stored C-RUN messages of `namespace`, or of every namespace."""
+    get_client().crun_messages.clear(namespace)
+    return envelope(ok=True, tool="crun_clear_messages", data={"namespace": namespace})

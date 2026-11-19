@@ -34,30 +34,46 @@ fails with `error.code=CRUN_DEFAULT_RULE_RESTRICTED`. A bad index fails with
 `CRUN_NOT_INITIALIZED` (detected from the backend's message text — crun.thrift
 declares no typed exception for it).
 
-## Reading rules and messages (for now: via the list window tools)
+## Reading messages
 
-`CRunBackend` has no RPC to read the live runtime-check messages at all —
-`CRunDisplay` (push-only: `itemAdded`/`itemUpdated`/...) is not wired up on
-the MCP side yet (see `TODO.md`). **Until then, both the messages and the
-rules can already be read with the existing `listwindow_*` tools**, against
-an IDE-hosted session (confirmed live against a running iaride):
+`crun_get_messages()` returns the live runtime-check messages. `CRunBackend`
+has no call to read them, so iar-cspy (`client.crun_messages`) hosts the
+push-only `CRunDisplay` service, registers it as `crun.display` on first use,
+and stores what the backend pushes, per namespace (the partner that sent
+them; `""` for an IDE). Only messages pushed *after* registration are seen, so
+call it before running the target. `crun_clear_messages([namespace])` forgets
+them.
 
 ```
-listwindow_get_rows("WIN_C_RUN_MESSAGES")       → the live runtime-check hits: message text, source
-                                                   file, PC, core, with nested call-stack rows
+crun_get_messages()                 → {"receiving": true, "namespaces": ["core0"], "count": 2,
+                                       "messages": [{"namespace": "core0", "name": "Division by zero",
+                                                     "text": ..., "call_stack": [...], "sub_messages": [...]}]}
+crun_get_messages(namespace="core0", max_messages=50)
+```
+
+If something else already registered `crun.display` — an IDE's own C-RUN
+Messages window — nothing reaches this server and `data.receiving` is false.
+A backend's `updateAll` push (no data) empties its namespace until the
+following pushes refill it, so the list can briefly be shorter than the
+backend's. This is a stopgap until the interface can return the current list.
+
+## Reading messages and rules from the IDE's list windows
+
+Against an IDE-hosted session both are also readable with the existing
+`listwindow_*` tools (confirmed live against a running iaride), which works
+even when the IDE owns `crun.display`:
+
+```
+listwindow_get_rows("WIN_C_RUN_MESSAGES")       → message text, source file, PC, core, with nested
+                                                   call-stack rows
 listwindow_get_rows("WIN_C_RUN_MESSAGE_RULES")  → the rules, read-only: Check / Source File / Action
-                                                   columns — a second way to list them, next to
+                                                   columns, a second way to list them next to
                                                    crun_list_rules()
 ```
 
-`WIN_C_RUN_MESSAGES`/`WIN_C_RUN_MESSAGE_RULES` are window ids, not registry
-service names — on an iaride host they are served through its shared
-`listwindow.snapshot` service, not one registry entry per window. This needs
-cspy-py's `listwindow.snapshot` routing fix (`feat/listwindow-snapshot`;
-tracked in cspy-py's `TODO.md`) to be in place first: without it,
-`listwindow_list_services` will not surface these ids and
-`listwindow_get_overview`/`listwindow_get_rows` on them fails with a raw
-"No such service" error. Against a plain CSpyServer2 (headless) session, this
-has not been verified yet — CRunLib registers the same window models there
-too, but whether that means one `ListWindowBackend` registry entry per
-window (the direct path) or nothing reachable at all is unconfirmed.
+These are window ids, not registry service names: iaride serves them through
+its shared `listwindow.snapshot` service. That needs cspy-py's
+`listwindow.snapshot` routing (`feat/listwindow-snapshot`) in place first;
+without it `listwindow_list_services` does not surface them and
+`listwindow_get_rows` fails with a raw "No such service" error. Not verified
+against a plain CSpyServer2 (headless) session.
