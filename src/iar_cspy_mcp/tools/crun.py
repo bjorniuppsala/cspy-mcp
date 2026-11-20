@@ -1,37 +1,21 @@
-"""C-RUN runtime-checking rule tools (the ``CRunBackend`` service, crun.thrift).
+"""C-RUN tools: rules, the default action, and the live runtime-check messages.
 
-Session-scoped, like breakpoints/memory: C-RUN's filter lives in the debug
-session (CSpyServer2), so every tool here requires one (``require_session``).
-See ``iar_cspy.crun`` for what is and is not natively supported by the
-backend - in short, only "add a rule" (always with the ``Log`` action) and
-"get/set the default rule's action" are real RPCs; list/update/delete are
-reconstructed on top of a save/load file round trip, which assumes the MCP
-server and the debug backend share a filesystem.
-
-Failures are enveloped (not left to raise), mirroring project.py/options.py:
-these are mutating, multi-step operations with real, structured failure
-modes worth reporting distinctly to an AI caller (not initialized, bad rule
-index, can't rescope/delete the default rule - see CRUN_* in
-``iar_cspy.errors.ERROR_CODES``), not the bare-``Any`` style breakpoints.py
-uses for pure passthroughs.
-
-Live runtime-check messages come from ``crun_get_messages`` (iar-cspy's
-``client.crun_messages``, which hosts ``CRunDisplay``); against an IDE that
-already hosts that service, ``listwindow_get_rows("WIN_C_RUN_MESSAGES")`` reads
-them instead. See docs/crun.md.
+Session-scoped, like breakpoints/memory: every tool requires a started debug
+session (``require_session``). Failures are enveloped, like project.py and
+options.py, with ``CRUN_*`` codes where there is one (see
+``iar_cspy.errors.ERROR_CODES``). Docs: docs/crun.md.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from iar_cspy import CSpyError, CrunRule
+from iar_cspy import CSpyError
 
 from .._app import envelope, get_client, mcp, require_session
 
-
-def _rule_data(rule: CrunRule) -> dict[str, Any]:
-    return rule.to_dict()
+#: The IDE's C-RUN Message Rules list window.
+RULES_WINDOW = "WIN_C_RUN_MESSAGE_RULES"
 
 
 def _crun_error(tool: str, data: dict[str, Any], exc: CSpyError) -> dict[str, Any]:
@@ -40,10 +24,7 @@ def _crun_error(tool: str, data: dict[str, Any], exc: CSpyError) -> dict[str, An
 
 @mcp.tool()
 def crun_get_default_action() -> dict[str, Any]:
-    """Get the default (always-last, catch-all) C-RUN rule's action.
-
-    Returns one of "STOP_AND_LOG", "LOG", "IGNORE".
-    """
+    """Get the default (catch-all) C-RUN rule's action: "STOP_AND_LOG", "LOG" or "IGNORE"."""
     require_session("crun_get_default_action")
     try:
         action = get_client().crun_rules.default_action()
@@ -54,7 +35,7 @@ def crun_get_default_action() -> dict[str, Any]:
 
 @mcp.tool()
 def crun_set_default_action(action: str) -> dict[str, Any]:
-    """Set the default (always-last, catch-all) C-RUN rule's action.
+    """Set the default (catch-all) C-RUN rule's action.
 
     Args:
         action: "STOP_AND_LOG", "LOG", or "IGNORE".
@@ -70,19 +51,23 @@ def crun_set_default_action(action: str) -> dict[str, Any]:
 
 @mcp.tool()
 def crun_list_rules() -> dict[str, Any]:
-    """List every C-RUN rule, index 0 first; the last one is always the default/catch-all.
+    """List the C-RUN rules as the IDE's C-RUN Message Rules window shows them.
 
-    Reconstructed from a save/load file round trip (CRunBackend has no
-    listing RPC): `ok=False` with error.code=CRUN_NOT_INITIALIZED when no
-    C-RUN-capable session is configured.
+    Each rule has `index` and `cells`, keyed by the window's column titles
+    (Check, Source File, Action). The last rule is the default one.
     """
     require_session("crun_list_rules")
     try:
-        rules = get_client().crun_rules.rules()
+        window = get_client().listwindows.window(RULES_WINDOW)
+        titles = [str(col.get("title", "")) for col in window.overview().columns or []]
+        result = window.rows()
     except CSpyError as exc:
         return _crun_error("crun_list_rules", {}, exc)
-    data = {"rules": [_rule_data(r) for r in rules], "count": len(rules)}
-    return envelope(ok=True, tool="crun_list_rules", data=data)
+    rules = []
+    for item in result.rows:
+        texts = [str(cell.get("text", "")) for cell in item["row"].get("cells", [])]
+        rules.append({"index": item["index"], "cells": dict(zip(titles, texts))})
+    return envelope(ok=True, tool="crun_list_rules", data={"rules": rules, "count": len(rules)})
 
 
 @mcp.tool()
@@ -93,16 +78,13 @@ def crun_add_rule(
     start_col: int | None = None,
     end_line: int | None = None,
     end_col: int | None = None,
-    action: str | None = None,
 ) -> dict[str, Any]:
-    """Add a C-RUN rule matching ``message_pattern``; it always lands at index 0.
+    """Add a C-RUN rule ahead of the existing ones, for messages matching `message_pattern`.
 
-    With no location it matches anywhere; with `file` alone, anywhere in
-    that file; with a line/col too (`file` required), that source range
-    (`end_line`/`end_col` default to `start_line`/`start_col` for a
-    single-point rule). The backend always creates the rule with the "LOG"
-    action; pass `action` ("STOP_AND_LOG"/"LOG"/"IGNORE") for a different one
-    (one extra round trip).
+    With no location it matches anywhere; with `file` alone, anywhere in that
+    file; with a line/col too (`file` required), in that source range
+    (`end_line`/`end_col` default to `start_line`/`start_col`, for a
+    single-point rule). The new rule's action is "LOG"; see crun_list_rules.
     """
     require_session("crun_add_rule")
     data = {
@@ -112,116 +94,19 @@ def crun_add_rule(
         "start_col": start_col,
         "end_line": end_line,
         "end_col": end_col,
-        "action": action,
     }
     try:
-        rule = get_client().crun_rules.add_rule(
+        get_client().crun_rules.add_rule(
             message_pattern,
             file=file,
             start_line=start_line,
             start_col=start_col,
             end_line=end_line,
             end_col=end_col,
-            action=action,
         )
     except CSpyError as exc:
         return _crun_error("crun_add_rule", data, exc)
-    return envelope(ok=True, tool="crun_add_rule", data=_rule_data(rule))
-
-
-@mcp.tool()
-def crun_update_rule(
-    index: int,
-    message_pattern: str | None = None,
-    file: str | None = None,
-    start_line: int | None = None,
-    start_col: int | None = None,
-    end_line: int | None = None,
-    end_col: int | None = None,
-    action: str | None = None,
-) -> dict[str, Any]:
-    """Edit one rule by its current index (see crun_list_rules); only given fields change.
-
-    The default/catch-all rule (the last index) always matches everything:
-    only its `action` can be changed here (use crun_set_default_action, or
-    this tool with only `action` set) - trying to change its pattern or
-    location fails with error.code=CRUN_DEFAULT_RULE_RESTRICTED. A bad
-    `index` fails with error.code=CRUN_INVALID_RULE_INDEX.
-    """
-    require_session("crun_update_rule")
-    data = {
-        "index": index,
-        "message_pattern": message_pattern,
-        "file": file,
-        "start_line": start_line,
-        "start_col": start_col,
-        "end_line": end_line,
-        "end_col": end_col,
-        "action": action,
-    }
-    try:
-        rule = get_client().crun_rules.update_rule(
-            int(index),
-            message_pattern=message_pattern,
-            file=file,
-            start_line=start_line,
-            start_col=start_col,
-            end_line=end_line,
-            end_col=end_col,
-            action=action,
-        )
-    except CSpyError as exc:
-        return _crun_error("crun_update_rule", data, exc)
-    return envelope(ok=True, tool="crun_update_rule", data=_rule_data(rule))
-
-
-@mcp.tool()
-def crun_delete_rule(index: int) -> dict[str, Any]:
-    """Delete one rule by its current index (see crun_list_rules).
-
-    The default/catch-all rule (the last index) cannot be deleted
-    (error.code=CRUN_DEFAULT_RULE_RESTRICTED) - set its action instead. A bad
-    `index` fails with error.code=CRUN_INVALID_RULE_INDEX.
-    """
-    require_session("crun_delete_rule")
-    data = {"index": index}
-    try:
-        get_client().crun_rules.delete_rule(int(index))
-    except CSpyError as exc:
-        return _crun_error("crun_delete_rule", data, exc)
-    return envelope(ok=True, tool="crun_delete_rule", data=data)
-
-
-@mcp.tool()
-def crun_load_filters(filename: str) -> dict[str, Any]:
-    """Replace the whole C-RUN rule set from an XML file.
-
-    `filename` is resolved on the backend's own filesystem (CSpyServer2 or
-    iaride), not this server's - only meaningful when they share one.
-    """
-    require_session("crun_load_filters")
-    data = {"filename": filename}
-    try:
-        get_client().crun_rules.load_filters(filename)
-    except CSpyError as exc:
-        return _crun_error("crun_load_filters", data, exc)
-    return envelope(ok=True, tool="crun_load_filters", data=data)
-
-
-@mcp.tool()
-def crun_save_filters(filename: str) -> dict[str, Any]:
-    """Write the whole C-RUN rule set to an XML file.
-
-    `filename` is resolved on the backend's own filesystem (CSpyServer2 or
-    iaride), not this server's - only meaningful when they share one.
-    """
-    require_session("crun_save_filters")
-    data = {"filename": filename}
-    try:
-        get_client().crun_rules.save_filters(filename)
-    except CSpyError as exc:
-        return _crun_error("crun_save_filters", data, exc)
-    return envelope(ok=True, tool="crun_save_filters", data=data)
+    return envelope(ok=True, tool="crun_add_rule", data=data)
 
 
 @mcp.tool()
@@ -240,8 +125,8 @@ def crun_get_messages(namespace: str | None = None, max_messages: int = 200) -> 
     `call_stack`, `break_action` and nested `sub_messages`. `data.truncated` is
     true when more than `max_messages` matched.
 
-    A backend's `updateAll` push empties a namespace until the following pushes
-    refill it, so the list can briefly be shorter than the backend's.
+    A backend's `updateAll` push empties its namespace until the pushes that
+    follow refill it.
     """
     messages = get_client().crun_messages
     try:

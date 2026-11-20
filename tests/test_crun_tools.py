@@ -2,125 +2,84 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
 
-from iar_cspy.crun import _RawEntry, _parse_filter_xml, _render_filter_xml
+from iar_cspy import CSpyError
 from iar_cspy.testing import crun_message
-from iar_cspy.types import CRunBreakAction
 
 
-class _FakeCrunBackend:
-    """Mirrors CssCRunBackendHandler.cpp closely enough for tool-level tests
-    (see cspy-py's tests/test_crun.py for the detailed behavior)."""
-
-    def __init__(self) -> None:
-        self.entries: list[_RawEntry] = [_RawEntry("*", "*", None, None, "*", None, None, CRunBreakAction.STOP_AND_LOG)]
-
-    def wire(self, rpc: Any) -> None:
-        rpc.on("crun", "saveFilters", self._save)
-        rpc.on("crun", "loadFilters", self._load)
-        rpc.on("crun", "addRuleOnMessage", lambda name: self._prepend(name, "*", None, None, "*", None, None))
-        rpc.on(
-            "crun",
-            "addRuleOnMessageFile",
-            lambda name, file: self._prepend(name, file, None, None, file, None, None),
-        )
-        rpc.on("crun", "getDefaultAction", lambda: int(self.entries[-1].action))
-        rpc.on("crun", "setDefaultAction", self._set_default_action)
-
-    def _prepend(self, name, start_file, start_line, start_col, end_file, end_line, end_col) -> None:
-        self.entries.insert(0, _RawEntry(name, start_file, start_line, start_col, end_file, end_line, end_col, CRunBreakAction.LOG))
-
-    def _set_default_action(self, action: int) -> None:
-        self.entries[-1] = _RawEntry("*", "*", None, None, "*", None, None, CRunBreakAction(action))
-
-    def _save(self, filename: str) -> None:
-        Path(filename).write_text(_render_filter_xml(self.entries), encoding="utf-8")
-
-    def _load(self, filename: str) -> None:
-        self.entries = _parse_filter_xml(Path(filename).read_text(encoding="utf-8"))
+def _rules_window(rows, columns=("Check", "Source File", "Action")):
+    return SimpleNamespace(
+        overview=lambda: SimpleNamespace(columns=[{"title": t} for t in columns]),
+        rows=lambda: SimpleNamespace(
+            rows=[{"index": i, "row": {"cells": [{"text": t} for t in row]}} for i, row in enumerate(rows)]
+        ),
+    )
 
 
-def _backend(rpc: Any) -> _FakeCrunBackend:
-    fake = _FakeCrunBackend()
-    fake.wire(rpc)
-    return fake
+def test_crun_list_rules_reads_the_rules_window(server, fake):
+    client, _ = fake
+    asked = []
 
+    def window(name):
+        asked.append(name)
+        return _rules_window([("AssertFailure", "main.c", "Log"), ("*", "*", "Stop")])
 
-def test_crun_list_rules_starts_with_just_the_default(server, fake):
-    _, rpc = fake
-    _backend(rpc)
+    client.listwindows.window = window
 
     out = server.crun_list_rules()
     assert out["ok"] is True
-    assert out["data"]["count"] == 1
-    assert out["data"]["rules"][0]["is_default"] is True
-    assert out["data"]["rules"][0]["action"] == "STOP_AND_LOG"
+    assert asked == ["WIN_C_RUN_MESSAGE_RULES"]
+    assert out["data"]["count"] == 2
+    assert out["data"]["rules"][0] == {"index": 0, "cells": {"Check": "AssertFailure", "Source File": "main.c", "Action": "Log"}}
+    assert out["data"]["rules"][1]["cells"]["Action"] == "Stop"
 
 
-def test_crun_add_rule_lands_at_index_zero_with_log_action(server, fake):
-    _, rpc = fake
-    _backend(rpc)
+def test_crun_list_rules_failure_is_an_envelope(server, fake):
+    client, _ = fake
 
-    out = server.crun_add_rule("AssertFailure")
-    assert out["ok"] is True
-    assert out["data"]["index"] == 0
-    assert out["data"]["action"] == "LOG"
-    assert out["data"]["is_default"] is False
+    def window(name):
+        raise CSpyError("List window 'WIN_C_RUN_MESSAGE_RULES' is not open in the IDE.")
 
-
-def test_crun_add_rule_with_action_sets_it(server, fake):
-    _, rpc = fake
-    _backend(rpc)
-
-    out = server.crun_add_rule("AssertFailure", action="IGNORE")
-    assert out["ok"] is True
-    assert out["data"]["action"] == "IGNORE"
-
-
-def test_crun_update_and_delete_rule(server, fake):
-    _, rpc = fake
-    _backend(rpc)
-    server.crun_add_rule("AssertFailure")
-
-    out = server.crun_update_rule(0, message_pattern="Other", action="STOP_AND_LOG")
-    assert out["ok"] is True
-    assert out["data"]["message_pattern"] == "Other"
-    assert out["data"]["action"] == "STOP_AND_LOG"
-
-    out = server.crun_delete_rule(0)
-    assert out["ok"] is True
+    client.listwindows.window = window
 
     out = server.crun_list_rules()
-    assert out["data"]["count"] == 1
-
-
-def test_crun_delete_default_rule_is_a_structured_error(server, fake):
-    _, rpc = fake
-    _backend(rpc)
-
-    out = server.crun_delete_rule(0)
     assert out["ok"] is False
-    assert out["error"]["code"] == "CRUN_DEFAULT_RULE_RESTRICTED"
-    assert out["error"]["retryable"] is False
+    assert "not open" in out["error"]["message"]
 
 
-def test_crun_update_rule_bad_index_is_a_structured_error(server, fake):
+def test_crun_add_rule_picks_the_call_from_the_location(server, fake):
     _, rpc = fake
-    _backend(rpc)
+    rpc.on("crun", "addRuleOnMessage", None)
+    rpc.on("crun", "addRuleOnMessageFile", None)
+    rpc.on("crun", "addRuleOnMessageRange", None)
 
-    out = server.crun_update_rule(5)
+    assert server.crun_add_rule("AssertFailure")["ok"] is True
+    assert rpc.args("crun", "addRuleOnMessage") == [("AssertFailure",)]
+
+    assert server.crun_add_rule("AssertFailure", file="main.c")["ok"] is True
+    assert rpc.args("crun", "addRuleOnMessageFile") == [("AssertFailure", "main.c")]
+
+    out = server.crun_add_rule("AssertFailure", file="main.c", start_line=10, start_col=1)
+    assert out["ok"] is True
+    [(name, range_)] = rpc.args("crun", "addRuleOnMessageRange")
+    assert range_["first"] == {"filename": "main.c", "line": 10, "col": 1}
+    assert range_["last"] == {"filename": "main.c", "line": 10, "col": 1}
+
+
+def test_crun_add_rule_range_without_a_file_is_an_envelope(server, fake):
+    out = server.crun_add_rule("AssertFailure", start_line=10)
     assert out["ok"] is False
-    assert out["error"]["code"] == "CRUN_INVALID_RULE_INDEX"
+    assert "needs 'file'" in out["error"]["message"]
 
 
 def test_crun_default_action_get_and_set(server, fake):
     _, rpc = fake
-    _backend(rpc)
+    rpc.on("crun", "setDefaultAction", None)
+    rpc.on("crun", "getDefaultAction", 1)
 
-    out = server.crun_set_default_action("LOG")
-    assert out["ok"] is True
+    assert server.crun_set_default_action("LOG")["ok"] is True
+    assert rpc.args("crun", "setDefaultAction") == [(1,)]
 
     out = server.crun_get_default_action()
     assert out["ok"] is True
@@ -138,21 +97,6 @@ def test_crun_not_initialized_is_a_structured_error(server, fake):
     out = server.crun_get_default_action()
     assert out["ok"] is False
     assert out["error"]["code"] == "CRUN_NOT_INITIALIZED"
-
-
-def test_crun_load_and_save_filters_pass_the_filename_through(server, fake, tmp_path):
-    _, rpc = fake
-    rpc.on("crun", "saveFilters", lambda filename: None)
-    rpc.on("crun", "loadFilters", lambda filename: None)
-
-    out_path = str(tmp_path / "rules.xml")
-    out = server.crun_save_filters(out_path)
-    assert out["ok"] is True
-    assert rpc.args("crun", "saveFilters") == [(out_path,)]
-
-    out = server.crun_load_filters(out_path)
-    assert out["ok"] is True
-    assert rpc.args("crun", "loadFilters") == [(out_path,)]
 
 
 def _display(client):

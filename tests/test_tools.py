@@ -59,7 +59,6 @@ def test_tool_inventory(server):
         "options_create_session", "options_destroy_session", "options_get_category_tree",
         "options_get_option_tree", "options_update_state", "options_commit", "options_call",
         "crun_get_default_action", "crun_set_default_action", "crun_list_rules", "crun_add_rule",
-        "crun_update_rule", "crun_delete_rule", "crun_load_filters", "crun_save_filters",
         "crun_get_messages", "crun_clear_messages",
     }  # fmt: skip
     assert names == expected
